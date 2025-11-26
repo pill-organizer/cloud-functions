@@ -339,7 +339,7 @@ export const checkEnvironmentalThresholds = functions.database
 
 export const aggregateDailyEnvironmentalData = functions.pubsub
   .schedule("0 0 * * *")
-  .timeZone("UTC")
+  .timeZone("Asia/Tashkent")
   .onRun(async () => {
     const { start, end, dateStr } = getDateRange(1); // Yesterday's data
 
