@@ -71,24 +71,36 @@ const NOTIFICATION_TITLES = {
 // Helper Functions - Validation
 // ============================================================================
 
+/**
+ * Validates if the given data is a valid NotificationData object.
+ * @param {unknown} data - The data to validate.
+ * @return {boolean} True if data is valid NotificationData.
+ */
 function isValidNotification(data: unknown): data is NotificationData {
   if (!data || typeof data !== "object") return false;
-  
+
   const notification = data as Record<string, unknown>;
-  
+  const isValidType = notification.type === "pill_reminder" ||
+    notification.type === "environment_alert";
+
   return (
-    (notification.type === "pill_reminder" || notification.type === "environment_alert") &&
+    isValidType &&
     typeof notification.message === "string" &&
     notification.message.length > 0 &&
     typeof notification.timestamp === "number"
   );
 }
 
+/**
+ * Validates if the given data is a valid EnvironmentalReading object.
+ * @param {unknown} data - The data to validate.
+ * @return {boolean} True if data is valid EnvironmentalReading.
+ */
 function isValidReading(data: unknown): data is EnvironmentalReading {
   if (!data || typeof data !== "object") return false;
-  
+
   const reading = data as Record<string, unknown>;
-  
+
   return (
     typeof reading.temperature === "number" &&
     typeof reading.humidity === "number" &&
@@ -100,20 +112,24 @@ function isValidReading(data: unknown): data is EnvironmentalReading {
 // Helper Functions - Database Operations
 // ============================================================================
 
+/**
+ * Fetches the device configuration from the database.
+ * @return {Promise<DeviceConfig | null>} The device config or null.
+ */
 async function getDeviceConfig(): Promise<DeviceConfig | null> {
   try {
     const snapshot = await admin
       .database()
       .ref(DB_PATHS.DEVICE_CONFIG)
       .once("value");
-    
+
     const config = snapshot.val();
-    
+
     if (!config) {
       console.warn("Device config not found in database");
       return null;
     }
-    
+
     return config;
   } catch (error) {
     console.error("Error fetching device config:", error);
@@ -121,6 +137,12 @@ async function getDeviceConfig(): Promise<DeviceConfig | null> {
   }
 }
 
+/**
+ * Updates the notification status in the database.
+ * @param {admin.database.Reference} ref - The database reference.
+ * @param {Partial<NotificationData>} updates - The updates to apply.
+ * @return {Promise<void>}
+ */
 async function updateNotificationStatus(
   ref: admin.database.Reference,
   updates: Partial<NotificationData>
@@ -137,14 +159,21 @@ async function updateNotificationStatus(
 // Helper Functions - Environmental Data
 // ============================================================================
 
+/**
+ * Calculates daily aggregates from environmental readings.
+ * @param {EnvironmentalReading[]} readings - Array of readings.
+ * @return {Omit<DailyEnvironmentalData, "date">} The aggregates.
+ */
 function calculateDailyAggregates(
   readings: EnvironmentalReading[]
 ): Omit<DailyEnvironmentalData, "date"> {
   const temperatures = readings.map((r) => r.temperature);
   const humidities = readings.map((r) => r.humidity);
 
-  const tempAvg = temperatures.reduce((sum, val) => sum + val, 0) / temperatures.length;
-  const humidityAvg = humidities.reduce((sum, val) => sum + val, 0) / humidities.length;
+  const tempSum = temperatures.reduce((sum, val) => sum + val, 0);
+  const tempAvg = tempSum / temperatures.length;
+  const humiditySum = humidities.reduce((sum, val) => sum + val, 0);
+  const humidityAvg = humiditySum / humidities.length;
 
   return {
     tempMin: Math.min(...temperatures),
@@ -156,6 +185,12 @@ function calculateDailyAggregates(
   };
 }
 
+/**
+ * Builds an alert message when environmental thresholds are exceeded.
+ * @param {EnvironmentalReading} reading - The environmental reading.
+ * @param {DeviceConfig} config - The device configuration.
+ * @return {string} The alert message or empty string.
+ */
 function buildEnvironmentalAlertMessage(
   reading: EnvironmentalReading,
   config: DeviceConfig
@@ -169,7 +204,8 @@ function buildEnvironmentalAlertMessage(
     );
   } else if (reading.temperature > config.tempMax) {
     alerts.push(
-      `Temperature too high: ${reading.temperature}°C (Max: ${config.tempMax}°C)`
+      `Temperature too high: ${reading.temperature}°C ` +
+      `(Max: ${config.tempMax}°C)`
     );
   }
 
@@ -187,14 +223,23 @@ function buildEnvironmentalAlertMessage(
   return alerts.join(" | ");
 }
 
-function getDateRange(daysAgo: number): { start: number; end: number; dateStr: string } {
+/**
+ * Gets the date range for a specific number of days ago.
+ * @param {number} daysAgo - Number of days in the past.
+ * @return {{start: number, end: number, dateStr: string}} The date range.
+ */
+function getDateRange(daysAgo: number): {
+  start: number;
+  end: number;
+  dateStr: string;
+} {
   const targetDate = new Date(Date.now() - daysAgo * MILLISECONDS_PER_DAY);
   const dateStr = targetDate.toISOString().split("T")[0];
-  
+
   const start = new Date(targetDate.setHours(0, 0, 0, 0)).getTime();
   const end = new Date(targetDate.setHours(23, 59, 59, 999)).getTime();
 
-  return { start, end, dateStr };
+  return {start, end, dateStr};
 }
 
 // ============================================================================
@@ -209,21 +254,31 @@ export const sendPillReminderNotification = functions.database
 
     // Validate notification data
     if (!isValidNotification(notificationData)) {
-      console.error("Invalid notification data:", { notificationId, data: notificationData });
+      console.error(
+        "Invalid notification data:",
+        {notificationId, data: notificationData}
+      );
       await updateNotificationStatus(snapshot.ref, {
         delivered: false,
         error: "Invalid notification data",
-      }).catch(() => {}); // Silently fail status update
+      }).catch(() => {
+        // Silently fail status update
+      });
       return null;
     }
 
     // Get device config
     const config = await getDeviceConfig();
     if (!config) {
-      console.error("Config unavailable, cannot send notification:", notificationId);
+      console.error(
+        "Config unavailable, cannot send notification:",
+        notificationId
+      );
       await updateNotificationStatus(snapshot.ref, {
         error: "Config unavailable",
-      }).catch(() => {});
+      }).catch(() => {
+        // Silently fail status update
+      });
       return null;
     }
 
@@ -234,7 +289,9 @@ export const sendPillReminderNotification = functions.database
         delivered: false,
         skipped: true,
         skipReason: "Push notifications disabled",
-      }).catch(() => {});
+      }).catch(() => {
+        // Silently fail status update
+      });
       return null;
     }
 
@@ -254,25 +311,38 @@ export const sendPillReminderNotification = functions.database
 
     try {
       const response = await admin.messaging().send(message);
-      console.log("Notification sent successfully:", { notificationId, response });
+      console.log(
+        "Notification sent successfully:",
+        {notificationId, response}
+      );
 
+      const timestamp =
+        admin.database.ServerValue.TIMESTAMP as unknown as number;
       await updateNotificationStatus(snapshot.ref, {
         delivered: true,
-        deliveredAt: admin.database.ServerValue.TIMESTAMP as unknown as number,
+        deliveredAt: timestamp,
       }).catch((error) => {
         console.error("Failed to update delivery status:", error);
       });
 
       return null;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      console.error("Failed to send notification:", { notificationId, error: errorMessage });
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown error";
+      console.error(
+        "Failed to send notification:",
+        {notificationId, error: errorMessage}
+      );
 
+      const lastAttempt =
+        admin.database.ServerValue.TIMESTAMP as unknown as number;
       await updateNotificationStatus(snapshot.ref, {
         delivered: false,
         error: errorMessage,
-        lastAttemptAt: admin.database.ServerValue.TIMESTAMP as unknown as number,
-      }).catch(() => {});
+        lastAttemptAt: lastAttempt,
+      }).catch(() => {
+        // Silently fail status update
+      });
 
       return null;
     }
@@ -320,7 +390,7 @@ export const checkEnvironmentalThresholds = functions.database
         .database()
         .ref(DB_PATHS.NOTIFICATIONS)
         .push(notification);
-      
+
       console.log("Environment alert created:", {
         notificationId: newNotificationRef.key,
         message: alertMessage,
@@ -341,7 +411,7 @@ export const aggregateDailyEnvironmentalData = functions.pubsub
   .schedule("0 0 * * *")
   .timeZone("Asia/Tashkent")
   .onRun(async () => {
-    const { start, end, dateStr } = getDateRange(1); // Yesterday's data
+    const {start, end, dateStr} = getDateRange(1); // Yesterday's data
 
     console.log(`Starting daily aggregation for ${dateStr}`);
 
@@ -398,6 +468,10 @@ export const aggregateDailyEnvironmentalData = functions.pubsub
 // Helper Functions - Data Cleanup
 // ============================================================================
 
+/**
+ * Cleans up daily environmental data older than retention period.
+ * @return {Promise<void>}
+ */
 async function cleanupOldDailyData(): Promise<void> {
   try {
     const cutoffDate = new Date();
@@ -421,7 +495,7 @@ async function cleanupOldDailyData(): Promise<void> {
     }
 
     const dateKeys = Object.keys(oldData);
-    
+
     if (dateKeys.length === 0) {
       console.log("No old daily data to clean up");
       return;
