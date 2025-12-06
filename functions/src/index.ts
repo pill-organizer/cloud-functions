@@ -60,7 +60,6 @@ const DB_PATHS = {
 
 const FCM_TOPIC = "smart-pill-organizer";
 const DAILY_DATA_RETENTION_DAYS = 20;
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 const NOTIFICATION_TITLES = {
   pill_reminder: "💊 Pill Reminder",
@@ -224,22 +223,49 @@ function buildEnvironmentalAlertMessage(
 }
 
 /**
- * Gets the date range for a specific number of days ago.
+ * Gets the date range for a specific number of days ago in Tashkent timezone.
+ * Returns Unix timestamps in MILLISECONDS to match database keys.
  * @param {number} daysAgo - Number of days in the past.
- * @return {{start: number, end: number, dateStr: string}} The date range.
+ * @return {{startKey: string, endKey: string, dateStr: string}} The date range.
  */
 function getDateRange(daysAgo: number): {
-  start: number;
-  end: number;
+  startKey: string;
+  endKey: string;
   dateStr: string;
 } {
-  const targetDate = new Date(Date.now() - daysAgo * MILLISECONDS_PER_DAY);
-  const dateStr = targetDate.toISOString().split("T")[0];
+  // Use Tashkent timezone (UTC+5) for consistency with the schedule
+  const now = new Date();
+  const tashkentOffset = 5 * 60; // UTC+5 in minutes
+  const localOffset = now.getTimezoneOffset(); // in minutes
+  const tashkentTime = new Date(now.getTime() +
+    (tashkentOffset + localOffset) * 60 * 1000);
 
-  const start = new Date(targetDate.setHours(0, 0, 0, 0)).getTime();
-  const end = new Date(targetDate.setHours(23, 59, 59, 999)).getTime();
+  // Go back the specified number of days
+  tashkentTime.setDate(tashkentTime.getDate() - daysAgo);
 
-  return {start, end, dateStr};
+  // Format as YYYY-MM-DD
+  const year = tashkentTime.getFullYear();
+  const month = String(tashkentTime.getMonth() + 1).padStart(2, "0");
+  const day = String(tashkentTime.getDate()).padStart(2, "0");
+  const dateStr = `${year}-${month}-${day}`;
+
+  // Calculate Unix timestamps for start and end of day (in Tashkent time)
+  const startOfDay = new Date(tashkentTime);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(tashkentTime);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  // Convert back to UTC timestamps (in MILLISECONDS)
+  const startUtc = startOfDay.getTime() -
+    (tashkentOffset + localOffset) * 60 * 1000;
+  const endUtc = endOfDay.getTime() -
+    (tashkentOffset + localOffset) * 60 * 1000;
+
+  // Return as strings for orderByKey() comparison
+  const startKey = startUtc.toString();
+  const endKey = endUtc.toString();
+
+  return {startKey, endKey, dateStr};
 }
 
 // ============================================================================
@@ -411,18 +437,19 @@ export const aggregateDailyEnvironmentalData = functions.pubsub
   .schedule("0 0 * * *")
   .timeZone("Asia/Tashkent")
   .onRun(async () => {
-    const {start, end, dateStr} = getDateRange(1); // Yesterday's data
+    const {startKey, endKey, dateStr} = getDateRange(1); // Yesterday's data
 
     console.log(`Starting daily aggregation for ${dateStr}`);
+    console.log(`Querying keys from ${startKey} to ${endKey}`);
 
     try {
-      // Fetch hourly readings from yesterday
+      // Fetch hourly readings from yesterday (using ISO string keys)
       const hourlySnapshot = await admin
         .database()
         .ref(DB_PATHS.ENVIRONMENTAL_HOURLY)
         .orderByKey()
-        .startAt(start.toString())
-        .endAt(end.toString())
+        .startAt(startKey)
+        .endAt(endKey)
         .once("value");
 
       const hourlyData = hourlySnapshot.val();
